@@ -4,4 +4,5 @@ export interface BlockedSite {
   startTime: string; // "HH:MM" 24-hour
   endTime: string;   // "HH:MM" 24-hour
   enabled: boolean;
+  pausedUntil?: number; // timestamp (ms) when pause expires
 }

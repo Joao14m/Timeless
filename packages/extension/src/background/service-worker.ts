@@ -12,6 +12,8 @@ function timeToMinutes(time: string): number {
 
 function isSiteBlocked(site: BlockedSite): boolean {
   if (!site.enabled) return false;
+  // Temporarily paused
+  if (site.pausedUntil && Date.now() < site.pausedUntil) return false;
   const current = getCurrentMinutes();
   const start = timeToMinutes(site.startTime);
   const end = timeToMinutes(site.endTime);
@@ -71,8 +73,17 @@ updateBlockRules();
 // Re-evaluate every minute to handle time window boundaries
 chrome.alarms.create('update-block-rules', { periodInMinutes: 1 });
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'update-block-rules') {
+    // Clear expired pauses
+    const sites = await getBlockedSites();
+    const now = Date.now();
+    const cleaned = sites.map((s) =>
+      s.pausedUntil && now >= s.pausedUntil ? { ...s, pausedUntil: undefined } : s
+    );
+    if (cleaned.some((s, i) => s !== sites[i])) {
+      await chrome.storage.local.set({ blockedSites: cleaned });
+    }
     updateBlockRules();
   }
 });
