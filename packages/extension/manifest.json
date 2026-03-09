@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Timeless",
+  "version": "1.0.0",
+  "description": "Block distracting websites during your focus hours.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Timeless"
+  },
+  "background": {
+    "service_worker": "src/background/service-worker.ts",
+    "type": "module"
+  },
+  "permissions": ["tabs", "storage", "alarms", "declarativeNetRequest"],
+  "host_permissions": ["<all_urls>"],
+  "web_accessible_resources": [
+    {
+      "resources": ["blocked.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
