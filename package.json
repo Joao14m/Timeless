@@ -1,0 +1,12 @@
+{
+  "name": "timeless",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev:extension": "npm run dev --workspace=packages/extension",
+    "dev:website": "npm run dev --workspace=packages/website",
+    "build:extension": "npm run build --workspace=packages/extension",
+    "build:website": "npm run build --workspace=packages/website"
+  }
+}
