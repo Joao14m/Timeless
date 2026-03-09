@@ -1,20 +1,25 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import type { BlockedSite } from '../types';
+
+const COOLDOWN_SECONDS = 30;
 
 function ToggleSwitch({
   checked,
   onChange,
+  disabled,
 }: {
   checked: boolean;
   onChange: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
       onClick={onChange}
+      disabled={disabled}
       aria-label={checked ? 'Disable block' : 'Enable block'}
       className={`relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors focus:outline-none ${
-        checked ? 'bg-violet-600' : 'bg-zinc-600'
-      }`}
+        disabled ? 'cursor-not-allowed opacity-50' : ''
+      } ${checked ? 'bg-violet-600' : 'bg-zinc-600'}`}
     >
       <span
         className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
@@ -41,6 +46,12 @@ function normalizeHostname(raw: string): string {
     .replace(/^www\./, '');
 }
 
+function formatPauseRemaining(pausedUntil: number): string {
+  const diff = Math.max(0, Math.ceil((pausedUntil - Date.now()) / 60000));
+  if (diff <= 0) return 'Resuming...';
+  return `Paused · ${diff}m left`;
+}
+
 export default function App() {
   const [sites, setSites] = useState<BlockedSite[]>([]);
   const [hostname, setHostname] = useState('');
@@ -48,11 +59,36 @@ export default function App() {
   const [endTime, setEndTime] = useState('17:00');
   const [error, setError] = useState('');
 
+  // Cooldown state: which site is counting down
+  const [cooldownId, setCooldownId] = useState<string | null>(null);
+  const [cooldownLeft, setCooldownLeft] = useState(0);
+  const cooldownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Options state: which site is showing pause options
+  const [optionsId, setOptionsId] = useState<string | null>(null);
+
+  // Global lock overlay countdown (starts when popup opens)
+  const [lockLeft, setLockLeft] = useState(COOLDOWN_SECONDS);
+
   useEffect(() => {
     chrome.storage.local.get('blockedSites', (result) => {
       setSites(result.blockedSites ?? []);
     });
   }, []);
+
+  useEffect(() => {
+    if (lockLeft <= 0) return;
+    const t = setInterval(() => setLockLeft((p) => p - 1), 1000);
+    return () => clearInterval(t);
+  }, [lockLeft]);
+
+  // Keep paused time displays updated
+  useEffect(() => {
+    const hasPaused = sites.some((s) => s.pausedUntil && Date.now() < s.pausedUntil);
+    if (!hasPaused) return;
+    const interval = setInterval(() => setSites((prev) => [...prev]), 10000);
+    return () => clearInterval(interval);
+  }, [sites]);
 
   function saveSites(updated: BlockedSite[]) {
     chrome.storage.local.set({ blockedSites: updated });
@@ -85,14 +121,68 @@ export default function App() {
     setError('');
   }
 
-  function toggleSite(id: string) {
+  const clearCooldown = useCallback(() => {
+    if (cooldownRef.current) clearInterval(cooldownRef.current);
+    cooldownRef.current = null;
+    setCooldownId(null);
+    setCooldownLeft(0);
+  }, []);
+
+  function handleToggle(site: BlockedSite) {
+    const isPaused = site.pausedUntil && Date.now() < site.pausedUntil;
+
+    // Re-enabling (or un-pausing) — instant, no friction
+    if (!site.enabled || isPaused) {
+      saveSites(
+        sites.map((s) =>
+          s.id === site.id ? { ...s, enabled: true, pausedUntil: undefined } : s
+        )
+      );
+      clearCooldown();
+      setOptionsId(null);
+      return;
+    }
+
+    // Trying to disable — start 30s cooldown
+    if (cooldownId === site.id) return; // already counting down
+    clearCooldown();
+    setOptionsId(null);
+    setCooldownId(site.id);
+    setCooldownLeft(COOLDOWN_SECONDS);
+
+    cooldownRef.current = setInterval(() => {
+      setCooldownLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(cooldownRef.current!);
+          cooldownRef.current = null;
+          setCooldownId(null);
+          setOptionsId(site.id);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  }
+
+  function handlePause(siteId: string, minutes: number) {
     saveSites(
-      sites.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s))
+      sites.map((s) =>
+        s.id === siteId
+          ? { ...s, pausedUntil: Date.now() + minutes * 60 * 1000 }
+          : s
+      )
     );
+    setOptionsId(null);
+  }
+
+  function handleCancelOptions() {
+    setOptionsId(null);
   }
 
   function removeSite(id: string) {
     saveSites(sites.filter((s) => s.id !== id));
+    if (cooldownId === id) clearCooldown();
+    if (optionsId === id) setOptionsId(null);
   }
 
   return (
@@ -104,54 +194,167 @@ export default function App() {
       </div>
 
       {/* Blocked sites list */}
-      <div className="max-h-64 overflow-y-auto px-4 py-3">
+      <div className="relative max-h-72 overflow-y-auto px-4 py-3">
+        {/* 30s lock overlay */}
+        {lockLeft > 0 && sites.length > 0 && (
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-900/90 backdrop-blur-sm">
+            <div className="relative flex h-14 w-14 items-center justify-center">
+              <svg className="h-14 w-14 -rotate-90" viewBox="0 0 56 56">
+                <circle
+                  cx="28" cy="28" r="24"
+                  fill="none" stroke="#27272a" strokeWidth="3"
+                />
+                <circle
+                  cx="28" cy="28" r="24"
+                  fill="none" stroke="#7c3aed" strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeDasharray={2 * Math.PI * 24}
+                  strokeDashoffset={2 * Math.PI * 24 * (lockLeft / COOLDOWN_SECONDS)}
+                  className="transition-all duration-1000 ease-linear"
+                />
+              </svg>
+              <span className="absolute text-lg font-bold text-violet-400">
+                {lockLeft}
+              </span>
+            </div>
+            <p className="mt-3 text-xs text-zinc-500">Take a moment to reconsider</p>
+          </div>
+        )}
         {sites.length === 0 ? (
           <p className="py-6 text-center text-sm text-zinc-600">
             No sites blocked yet.
           </p>
         ) : (
           <ul className="space-y-2">
-            {sites.map((site) => (
-              <li
-                key={site.id}
-                className="flex items-center gap-3 rounded-lg bg-zinc-800 px-3 py-2"
-              >
-                <ToggleSwitch
-                  checked={site.enabled}
-                  onChange={() => toggleSite(site.id)}
-                />
-                <div className="min-w-0 flex-1">
-                  <p
-                    className={`truncate text-sm font-medium ${
-                      site.enabled ? 'text-zinc-100' : 'text-zinc-500'
-                    }`}
-                  >
-                    {site.hostname}
-                  </p>
-                  <p className="text-xs text-zinc-500">
-                    {formatTime(site.startTime)} – {formatTime(site.endTime)}
-                  </p>
-                </div>
-                <button
-                  onClick={() => removeSite(site.id)}
-                  aria-label="Remove"
-                  className="flex-shrink-0 text-zinc-600 transition-colors hover:text-zinc-300"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="h-4 w-4"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
-                </button>
-              </li>
-            ))}
+            {sites.map((site) => {
+              const isPaused =
+                !!site.pausedUntil && Date.now() < site.pausedUntil;
+              const isCounting = cooldownId === site.id;
+              const isShowingOptions = optionsId === site.id;
+
+              return (
+                <li key={site.id} className="rounded-lg bg-zinc-800">
+                  <div className="flex items-center gap-3 px-3 py-2">
+                    {isCounting ? (
+                      // 30s countdown ring
+                      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center">
+                        <div className="relative flex h-7 w-7 items-center justify-center">
+                          <svg className="h-7 w-7 -rotate-90" viewBox="0 0 28 28">
+                            <circle
+                              cx="14"
+                              cy="14"
+                              r="12"
+                              fill="none"
+                              stroke="#3f3f46"
+                              strokeWidth="2"
+                            />
+                            <circle
+                              cx="14"
+                              cy="14"
+                              r="12"
+                              fill="none"
+                              stroke="#7c3aed"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeDasharray={2 * Math.PI * 12}
+                              strokeDashoffset={
+                                2 * Math.PI * 12 * (1 - cooldownLeft / COOLDOWN_SECONDS)
+                              }
+                              className="transition-all duration-1000 ease-linear"
+                            />
+                          </svg>
+                          <span className="absolute text-[10px] font-bold text-violet-400">
+                            {cooldownLeft}
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <ToggleSwitch
+                        checked={site.enabled && !isPaused}
+                        onChange={() => handleToggle(site)}
+                        disabled={isShowingOptions}
+                      />
+                    )}
+
+                    <div className="min-w-0 flex-1">
+                      <p
+                        className={`truncate text-sm font-medium ${
+                          site.enabled && !isPaused
+                            ? 'text-zinc-100'
+                            : 'text-zinc-500'
+                        }`}
+                      >
+                        {site.hostname}
+                      </p>
+                      <p className="text-xs text-zinc-500">
+                        {isPaused
+                          ? formatPauseRemaining(site.pausedUntil!)
+                          : isCounting
+                            ? 'Are you sure?'
+                            : `${formatTime(site.startTime)} – ${formatTime(site.endTime)}`}
+                      </p>
+                    </div>
+
+                    {isCounting ? (
+                      <button
+                        onClick={() => clearCooldown()}
+                        className="flex-shrink-0 text-xs text-zinc-500 transition-colors hover:text-zinc-300"
+                      >
+                        Cancel
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => removeSite(site.id)}
+                        aria-label="Remove"
+                        className="flex-shrink-0 text-zinc-600 transition-colors hover:text-zinc-300"
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          className="h-4 w-4"
+                          viewBox="0 0 20 20"
+                          fill="currentColor"
+                        >
+                          <path
+                            fillRule="evenodd"
+                            d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                            clipRule="evenodd"
+                          />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Pause options after cooldown */}
+                  {isShowingOptions && (
+                    <div className="border-t border-zinc-700 px-3 py-2">
+                      <p className="mb-2 text-xs text-zinc-400">
+                        Pause blocking for:
+                      </p>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handlePause(site.id, 15)}
+                          className="flex-1 rounded-md bg-zinc-700 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-600"
+                        >
+                          15 min
+                        </button>
+                        <button
+                          onClick={() => handlePause(site.id, 30)}
+                          className="flex-1 rounded-md bg-zinc-700 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:bg-zinc-600"
+                        >
+                          30 min
+                        </button>
+                        <button
+                          onClick={handleCancelOptions}
+                          className="flex-1 rounded-md bg-violet-600 py-1.5 text-xs font-medium text-white transition-colors hover:bg-violet-700"
+                        >
+                          Keep on
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
