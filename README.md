@@ -74,13 +74,6 @@ npm run build:website    # → packages/website/dist
 | `declarativeNetRequest` | Redirect blocked sites to the blocked page |
 | `host_permissions: <all_urls>` | Apply blocking rules to any website |
 
-## Publishing to Chrome Web Store
-
-1. `npm run build:extension`
-2. Zip the `packages/extension/dist` folder
-3. Upload at the [Chrome Developer Dashboard](https://chrome.google.com/webstore/devconsole)
-4. Submit for review
-
 ## License
 
 MIT
